@@ -285,7 +285,7 @@ uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
     return maxlat;
 }
 
-static uint64_t zns_read(struct zns_ssd *zns, NvmeRequest *req)
+static uint64_t zns_read(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
 {
     uint64_t lba = req->slba;
     uint32_t nlb = req->nlb;
@@ -295,23 +295,35 @@ static uint64_t zns_read(struct zns_ssd *zns, NvmeRequest *req)
     //int wcidx = zns_get_wcidx(zns);
     struct ppa ppa;
     uint64_t lpn;
-    uint64_t sublat, maxlat = 0;
+    uint64_t sublat = 0, maxlat = 0;
+    uint64_t ezrwa = 0;
+    NvmeNamespace *ns = req->ns;
+    NvmeZone *zone = zns_get_zone_by_slba(ns, lba);
+
+    if (zone->d.za & NVME_ZA_ZRWA_VALID){
+        ezrwa = zone->w_ptr + n->zns->zrwas - 1;
+    }
 
     /* normal IO read path */
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-        ppa = get_maptbl_ent(zns, lpn);
-        if (!mapped_ppa(&ppa) || !valid_ppa(zns, &ppa)) {
-            continue;
+        if ((zone->d.za & NVME_ZA_ZRWA_VALID) && lpn * secs_per_pg < ezrwa) {
+            sublat += SRAM_WRITE_LATENCY_NS;
+            maxlat = (sublat > maxlat) ? sublat : maxlat;
+        }else{
+            ppa = get_maptbl_ent(zns, lpn);
+            if (!mapped_ppa(&ppa) || !valid_ppa(zns, &ppa)) {
+                continue;
+            }
+
+            struct nand_cmd srd;
+            srd.type = USER_IO;
+            srd.cmd = NAND_READ;
+            srd.stime = req->stime;
+
+            sublat = zns_advance_status(zns, &ppa, &srd);
+            ftl_debug("[R] lpn:\t%lu\t<--ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
+            maxlat = (sublat > maxlat) ? sublat : maxlat;
         }
-
-        struct nand_cmd srd;
-        srd.type = USER_IO;
-        srd.cmd = NAND_READ;
-        srd.stime = req->stime;
-
-        sublat = zns_advance_status(zns, &ppa, &srd);
-        ftl_debug("[R] lpn:\t%lu\t<--ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
-        maxlat = (sublat > maxlat) ? sublat : maxlat;
     }
 
     return maxlat;
@@ -335,11 +347,11 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
             ppa.g.pl = p;
             for(j = 0; j < flash_type ;j++)
             {
-                ppa.g.pg = get_blk(zns,&ppa)->page_wp;
+                ppa.g.pg = get_blk(zns, &ppa)->page_wp;
                 get_blk(zns,&ppa)->page_wp++;
-                for(subpage = 0;subpage < ZNS_PAGE_SIZE/LOGICAL_PAGE_SIZE;subpage++)
+                for(subpage = 0;subpage < ZNS_PAGE_SIZE / LOGICAL_PAGE_SIZE;subpage++)
                 {
-                    if(i+subpage >= zns->cache.write_cache[wcidx].used)
+                    if(i + subpage >= zns->cache.write_cache[wcidx].used)
                     {
                         //No need to write an invalid page
                         break;
@@ -354,7 +366,7 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
                     set_maptbl_ent(zns, lpn, &ppa);
                     // ftl_debug("[F] lpn:\t%lu\t-->ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
                 }
-                i+=ZNS_PAGE_SIZE/LOGICAL_PAGE_SIZE;
+                i += ZNS_PAGE_SIZE / LOGICAL_PAGE_SIZE;
             }
             //FIXME Misao: identify padding page
             if(ppa.g.V)
@@ -375,26 +387,40 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
     return maxlat;
 }
 
-static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
+static uint64_t zns_write(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
 {
     uint64_t lba = req->slba;
     uint32_t nlb = req->nlb;
-    uint64_t secs_per_pg = LOGICAL_PAGE_SIZE/zns->lbasz;
+    uint64_t secs_per_pg = LOGICAL_PAGE_SIZE / zns->lbasz;
     uint64_t start_lpn = lba / secs_per_pg;
     uint64_t end_lpn = (lba + nlb - 1) / secs_per_pg;
     uint64_t lpn;
     uint64_t sublat = 0, maxlat = 0;
+    uint64_t ezrwa = 0, elba = 0;
+    NvmeNamespace *ns = req->ns;
+    NvmeZone *zone = zns_get_zone_by_slba(ns, lba);
+    bool flush = false;
     int i;
     int wcidx = zns_get_wcidx(zns);
 
-    if(wcidx==-1)
+    if (zone->d.za & NVME_ZA_ZRWA_VALID){
+        ezrwa = zone->w_ptr + n->zns->zrwas - 1;
+        elba = lba + nlb;
+        if (elba > ezrwa) {
+            flush = true;
+        }
+    }else{
+        flush = true;
+    }
+
+    if(flush == true && wcidx == -1)
     {
         //need flush
         wcidx = 0;
         uint64_t t_used = zns->cache.write_cache[wcidx].used;
-        for(i = 1;i < zns->cache.num_wc;i++)
+        for(i = 0; i < zns->cache.num_wc; i++)
         {
-            if(zns->cache.write_cache[i].used==0)
+            if(zns->cache.write_cache[i].used == 0)
             {
                 t_used = 0;
                 wcidx = i; //free wc！
@@ -406,23 +432,30 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
                 wcidx = i;
             }
         }
-        if(t_used) maxlat = zns_wc_flush(zns,wcidx,USER_IO,req->stime);
+        if (t_used) maxlat = zns_wc_flush(zns, wcidx, USER_IO, req->stime);
         zns->cache.write_cache[wcidx].sblk = zns->active_zone;
     }
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-        if(zns->cache.write_cache[wcidx].used==zns->cache.write_cache[wcidx].cap)
-        {
-            ftl_debug("[W] flush wc %d (%u/%u)\n",wcidx,(int)zns->cache.write_cache[wcidx].used,(int)zns->cache.write_cache[wcidx].cap);
-            sublat = zns_wc_flush(zns,wcidx,USER_IO,req->stime);
-            ftl_debug("[W] flush lat: %u\n", (int)sublat);
+        if ((zone->d.za & NVME_ZA_ZRWA_VALID) && lpn * secs_per_pg < ezrwa){
+            // In-ZRWA writes will not write to SSD page cache
+            sublat += SRAM_WRITE_LATENCY_NS;
+        }else{
+
+            if(zns->cache.write_cache[wcidx].used==zns->cache.write_cache[wcidx].cap)
+            {
+                ftl_debug("[W] flush wc %d (%u/%u)\n",wcidx,(int)zns->cache.write_cache[wcidx].used,(int)zns->cache.write_cache[wcidx].cap);
+                sublat = zns_wc_flush(zns,wcidx,USER_IO,req->stime);
+                ftl_debug("[W] flush lat: %u\n", (int)sublat);
+                maxlat = (sublat > maxlat) ? sublat : maxlat;
+                sublat = 0;
+            }
+            zns->cache.write_cache[wcidx].lpns[zns->cache.write_cache[wcidx].used++]=lpn;
+            sublat += SRAM_WRITE_LATENCY_NS; //Simplified timing emulation
             maxlat = (sublat > maxlat) ? sublat : maxlat;
-            sublat = 0;
+            ftl_debug("[W] lpn:\t%lu\t-->wc cache:%u, used:%u\n",lpn,(int)wcidx,(int)zns->cache.write_cache[wcidx].used);
         }
-        zns->cache.write_cache[wcidx].lpns[zns->cache.write_cache[wcidx].used++]=lpn;
-        sublat += SRAM_WRITE_LATENCY_NS; //Simplified timing emulation
         maxlat = (sublat > maxlat) ? sublat : maxlat;
-        ftl_debug("[W] lpn:\t%lu\t-->wc cache:%u, used:%u\n",lpn,(int)wcidx,(int)zns->cache.write_cache[wcidx].used);
     }
     return maxlat;
 }
@@ -432,9 +465,10 @@ static void *ftl_thread(void *arg)
     FemuCtrl *n = (FemuCtrl *)arg;
     struct zns_ssd *zns = n->zns;
     NvmeRequest *req = NULL;
-    uint64_t lat = 0;
+    uint64_t lat = 0, stime = 0;
     int rc;
     int i;
+    int wcidx = 0;
 
     while (!*(zns->dataplane_started_ptr)) {
         usleep(100000);
@@ -460,10 +494,10 @@ static void *ftl_thread(void *arg)
                 case NVME_CMD_ZONE_APPEND:
                     /* Fall through */
                 case NVME_CMD_WRITE:
-                    lat = zns_write(zns, req);
+                    lat = zns_write(n, zns, req);
                     break;
                 case NVME_CMD_READ:
-                    lat = zns_read(zns, req);
+                    lat = zns_read(n, zns, req);
                     break;
                 case NVME_CMD_DSM:
                     lat = 0;
@@ -479,6 +513,12 @@ static void *ftl_thread(void *arg)
             rc = femu_ring_enqueue(zns->to_poller[i], (void *)&req, 1);
             if (rc != 1) {
                 ftl_err("FTL to_poller enqueue failed\n");
+            }
+
+            // Flush write buffer in background
+            stime = req->expire_time;
+            for(wcidx = 0; wcidx < zns->cache.num_wc; wcidx++){
+                stime += zns_wc_flush(zns, wcidx, USER_IO, stime);
             }
 
         }

@@ -20,15 +20,15 @@ fi
 
 SSD_SIZE_MB=4096
 NUM_CHANNELS=8
-NUM_CHIPS_PER_CHANNEL=4
-NUM_PLANES_PER_CHIP=2
+NUM_CHIPS_PER_CHANNEL=8
+NUM_PLANES_PER_CHIP=1
 NUM_BLOCKS_PER_CHIP=32
 
 MAX_ACTIVE=14
 MAX_OPEN=14
 ZRWA_SZ=1048576
 ZRWA_FG=-1
-NUM_ZRWA=0
+NUM_ZRWA=14
 
 # SLC:1 MLC:2 TLC:3 QLC:4
 # MLC is not allowed
@@ -59,7 +59,9 @@ sudo ./qemu-system-x86_64 \
     -device scsi-hd,drive=hd0 \
     -drive file=$OSIMGF,if=none,aio=native,cache=none,format=qcow2,id=hd0 \
     ${FEMU_OPTIONS} \
-    -net user,hostfwd=tcp::8080-:22 \
+    -net user,hostfwd=tcp::6666-:22 \
     -net nic,model=virtio \
     -nographic \
+    -virtfs local,path=$(mkdir -p ../hostshare && cd ../hostshare && pwd),mount_tag=host0,security_model=passthrough,id=host0 \
+    -device virtio-9p-pci,fsdev=host0,mount_tag=hostshare  \
     -qmp unix:./qmp-sock,server,nowait 2>&1 | tee log

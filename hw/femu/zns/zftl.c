@@ -68,6 +68,9 @@ static void zns_advance_write_pointer(struct zns_ssd *zns)
     }
 }
 
+
+
+
 static uint64_t zns_advance_status(struct zns_ssd *zns, struct ppa *ppa,struct nand_cmd *ncmd)
 {
     int c = ncmd->cmd;
@@ -329,57 +332,53 @@ static uint64_t zns_read(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
     return maxlat;
 }
 
-static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t stime)
+static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type, uint64_t stime)
 {
-    int i,j,p,subpage;
+    int i,subpage;
     struct ppa ppa;
     struct ppa oldppa;
     uint64_t lpn;
-    int flash_type = zns->flash_type;
     uint64_t sublat = 0, maxlat = 0;
 
     i = 0;
-    while(i < zns->cache.write_cache[wcidx].used)
-    {
-        for(p = 0;p<zns->num_plane;p++){
-            /* new write */
-            ppa = get_new_page(zns);
-            ppa.g.pl = p;
-            for(j = 0; j < flash_type ;j++)
+    while(i < zns->cache.write_cache[wcidx].used){
+
+        /* new write */
+        ppa = get_new_page(zns);
+        ppa.g.pl = 0;
+        ppa.g.pg = get_blk(zns, &ppa)->page_wp;
+        get_blk(zns, &ppa)->page_wp++;
+        for (subpage = 0; subpage < ZNS_PAGE_SIZE / LOGICAL_PAGE_SIZE; subpage++)
+        {
+            if (i + subpage >= zns->cache.write_cache[wcidx].used)
             {
-                ppa.g.pg = get_blk(zns, &ppa)->page_wp;
-                get_blk(zns,&ppa)->page_wp++;
-                for(subpage = 0;subpage < ZNS_PAGE_SIZE / LOGICAL_PAGE_SIZE;subpage++)
-                {
-                    if(i + subpage >= zns->cache.write_cache[wcidx].used)
-                    {
-                        //No need to write an invalid page
-                        break;
-                    }
-                    lpn = zns->cache.write_cache[wcidx].lpns[i+subpage];
-                    oldppa = get_maptbl_ent(zns, lpn);
-                    if (mapped_ppa(&oldppa)) {
-                        /* FIXME: Misao: update old page information*/
-                    }
-                    ppa.g.spg = subpage;
-                    /* update maptbl */
-                    set_maptbl_ent(zns, lpn, &ppa);
-                    // ftl_debug("[F] lpn:\t%lu\t-->ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
-                }
-                i += ZNS_PAGE_SIZE / LOGICAL_PAGE_SIZE;
+                //No need to write an invalid page
+                break;
             }
-            //FIXME Misao: identify padding page
-            if(ppa.g.V)
-            {
-                struct nand_cmd swr;
-                swr.type = type;
-                swr.cmd = NAND_WRITE;
-                swr.stime = stime;
-                /* get latency statistics */
-                sublat = zns_advance_status(zns, &ppa, &swr);
-                maxlat = (sublat > maxlat) ? sublat : maxlat;
+            lpn = zns->cache.write_cache[wcidx].lpns[i + subpage];
+            oldppa = get_maptbl_ent(zns, lpn);
+            if (mapped_ppa(&oldppa)) {
+                /* FIXME: Misao: update old page information*/
             }
+            ppa.g.spg = subpage;
+            /* update maptbl */
+            set_maptbl_ent(zns, lpn, &ppa);
+            // ftl_debug("[F] lpn:\t%lu\t-->ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
         }
+        i += ZNS_PAGE_SIZE / LOGICAL_PAGE_SIZE;
+        
+        //FIXME Misao: identify padding page
+        if(ppa.g.V)
+        {
+            struct nand_cmd swr;
+            swr.type = type;
+            swr.cmd = NAND_WRITE;
+            swr.stime = stime;
+            /* get latency statistics */
+            sublat = zns_advance_status(zns, &ppa, &swr);
+            maxlat = (sublat > maxlat) ? sublat : maxlat;
+        }
+        
         /* need to advance the write pointer here */
         zns_advance_write_pointer(zns);
     }
@@ -389,14 +388,17 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
 
 static uint64_t zns_write(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
 {
+    struct ppa ppa, oldppa;
+    int subpage = 0;
     uint64_t lba = req->slba;
+    uint64_t plba = 0;
     uint32_t nlb = req->nlb;
     uint64_t secs_per_pg = LOGICAL_PAGE_SIZE / zns->lbasz;
     uint64_t start_lpn = lba / secs_per_pg;
     uint64_t end_lpn = (lba + nlb - 1) / secs_per_pg;
-    uint64_t lpn;
+    uint64_t lpn, flushing_lpn;
     uint64_t sublat = 0, maxlat = 0;
-    uint64_t ezrwa = 0, elba = 0;
+    uint64_t ezrwa = 0, elba = 0, eizfr = 0; // IZFR: Implicit Zone Flush Region
     NvmeNamespace *ns = req->ns;
     NvmeZone *zone = zns_get_zone_by_slba(ns, lba);
     bool flush = false;
@@ -405,6 +407,7 @@ static uint64_t zns_write(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
 
     if (zone->d.za & NVME_ZA_ZRWA_VALID){
         ezrwa = zone->w_ptr + n->zns->zrwas - 1;
+        eizfr = zone->w_ptr + (2 * n->zns->zrwas) - 1;
         elba = lba + nlb;
         if (elba > ezrwa) {
             flush = true;
@@ -437,15 +440,48 @@ static uint64_t zns_write(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
     }
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-        if ((zone->d.za & NVME_ZA_ZRWA_VALID) && lpn * secs_per_pg < ezrwa){
+        plba = lpn * secs_per_pg;
+        if ((zone->d.za & NVME_ZA_ZRWA_VALID) && plba < ezrwa){
             // In-ZRWA writes will not write to SSD page cache
             sublat += SRAM_WRITE_LATENCY_NS;
-        }else{
+            write_log("ZRWA Write to lpn 0x%"PRIx64"\n", lpn);
+        }else if ((zone->d.za & NVME_ZA_ZRWA_VALID) && plba > ezrwa && plba < eizfr){
+            // Implicit flush
+            
+            flushing_lpn = (plba - n->zns->zrwas) / secs_per_pg;
+            write_log("ZRWA Implicit Flush to lpn 0x%"PRIx64", current lpn: 0x%"PRIx64"\n", flushing_lpn, lpn);
+            ppa = get_new_page(zns);
+            ppa.g.pl = 0;
+            ppa.g.pg = get_blk(zns, &ppa)->page_wp;
+            get_blk(zns, &ppa)->page_wp++;
+            
+            oldppa = get_maptbl_ent(zns, flushing_lpn);
+            if (mapped_ppa(&oldppa)) {
+                /* FIXME: Misao: update old page information*/
+            }
+            ppa.g.spg = subpage;
+            /* update maptbl */
+            set_maptbl_ent(zns, flushing_lpn, &ppa);
+            // ftl_debug("[F] lpn:\t%lu\t-->ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
+            //FIXME Misao: identify padding page
+            if(ppa.g.V)
+            {
+                struct nand_cmd swr;
+                swr.type = USER_IO;
+                swr.cmd = NAND_WRITE;
+                swr.stime = req->stime;
+                /* get latency statistics */
+                sublat = zns_advance_status(zns, &ppa, &swr);
+                // Assume DRAM latency is hidden by Die latency
+                maxlat = (sublat > maxlat) ? sublat : maxlat;
+            }
 
+
+        }else{
             if(zns->cache.write_cache[wcidx].used==zns->cache.write_cache[wcidx].cap)
             {
                 ftl_debug("[W] flush wc %d (%u/%u)\n",wcidx,(int)zns->cache.write_cache[wcidx].used,(int)zns->cache.write_cache[wcidx].cap);
-                sublat = zns_wc_flush(zns,wcidx,USER_IO,req->stime);
+                sublat = zns_wc_flush(zns,wcidx, USER_IO, req->stime);
                 ftl_debug("[W] flush lat: %u\n", (int)sublat);
                 maxlat = (sublat > maxlat) ? sublat : maxlat;
                 sublat = 0;
@@ -458,6 +494,76 @@ static uint64_t zns_write(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
         maxlat = (sublat > maxlat) ? sublat : maxlat;
     }
     return maxlat;
+}
+
+static uint64_t zns_zone_mgmt_send_with_latency(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
+{
+    NvmeCmd *cmd = (NvmeCmd *)&req->cmd;
+    uint32_t dw13 = le32_to_cpu(cmd->cdw13);
+    uint8_t action;
+    uint64_t elba;
+    uint32_t zone_idx;
+
+    zns_get_mgmt_zone_slba_idx(n, cmd, &elba, &zone_idx);
+
+    NvmeZone *zone = &n->zone_array[zone_idx];
+
+    uint64_t sublat = 0, maxlat = 0;
+
+    uint64_t lba = zone->w_ptr;
+    uint64_t lpn = 0;
+    // uint32_t nlb = elba - lba + 1;
+    uint64_t secs_per_pg = LOGICAL_PAGE_SIZE / zns->lbasz;
+    uint64_t start_lpn = lba / secs_per_pg;
+    uint64_t end_lpn = elba / secs_per_pg;
+
+    // TODO: check elba in print
+    // See if it is aligned with n->zns->zrwafg or n->zns->zrwafg - 1
+
+    struct ppa ppa, oldppa;
+
+    action = dw13 & 0xff;
+
+    req->status = NVME_SUCCESS;
+
+    switch (action) {
+        case NVME_ZONE_ACTION_ZRWA_FLUSH:
+            for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+                ppa = get_new_page(zns);
+                ppa.g.pl = 0;
+                ppa.g.pg = get_blk(zns, &ppa)->page_wp;
+                get_blk(zns, &ppa)->page_wp++;
+                oldppa = get_maptbl_ent(zns, lpn);
+                if (mapped_ppa(&oldppa)) {
+                    /* FIXME: Misao: update old page information*/
+                }
+                ppa.g.spg = 0;
+                /* update maptbl */
+                set_maptbl_ent(zns, lpn, &ppa);
+                // ftl_debug("[F] lpn:\t%lu\t-->ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
+            
+            
+                //FIXME Misao: identify padding page
+                if(ppa.g.V)
+                {
+                    struct nand_cmd swr;
+                    swr.type = USER_IO;
+                    swr.cmd = NAND_WRITE;
+                    swr.stime = req->stime;
+                    /* get latency statistics */
+                    sublat = zns_advance_status(zns, &ppa, &swr);
+                    maxlat = (sublat > maxlat) ? sublat : maxlat;
+                }
+            }
+            return maxlat;
+
+            
+            
+            // return zns_zone_mgmt_send_zrwa_flush(n, zone, slba, req);
+        default:
+            return 0;
+    }
+
 }
 
 static void *ftl_thread(void *arg)
@@ -502,6 +608,8 @@ static void *ftl_thread(void *arg)
                 case NVME_CMD_DSM:
                     lat = 0;
                     break;
+                case NVME_CMD_ZONE_MGMT_SEND:
+                    lat = zns_zone_mgmt_send_with_latency(n, zns, req);
                 default:
                     //ftl_err("FTL received unkown request type, ERROR\n");
                     ;

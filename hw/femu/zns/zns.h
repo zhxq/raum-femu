@@ -9,10 +9,11 @@
 #define CH_BITS     (1)
 
 #include "../nvme.h"
+#include "../write_log.h"
 #include "zftl.h"
 
 #define LOGICAL_PAGE_SIZE (4*KiB)
-#define ZNS_PAGE_SIZE (16*KiB)
+#define ZNS_PAGE_SIZE (4*KiB)
 #define ZNS_DEFAULT_NUM_WRITE_CACHE (3)
 #define ZNS_DEFAULT_L2P_CACHE_SIZE (1*MiB)
 
@@ -435,6 +436,29 @@ static inline NvmeZone *zns_get_zone_by_slba(NvmeNamespace *ns, uint64_t slba)
 
     assert(zone_idx < n->num_zones);
     return &n->zone_array[zone_idx];
+}
+
+static uint16_t zns_get_mgmt_zone_slba_idx(FemuCtrl *n, NvmeCmd *c,
+                                           uint64_t *slba, uint32_t *zone_idx)
+{
+    NvmeNamespace *ns = &n->namespaces[0];
+    uint32_t dw10 = le32_to_cpu(c->cdw10);
+    uint32_t dw11 = le32_to_cpu(c->cdw11);
+
+    if (!n->zoned) {
+        return NVME_INVALID_OPCODE | NVME_DNR;
+    }
+
+    *slba = ((uint64_t)dw11) << 32 | dw10;
+    if (unlikely(*slba >= ns->id_ns.nsze)) {
+        *slba = 0;
+        return NVME_LBA_RANGE | NVME_DNR;
+    }
+
+    *zone_idx = zns_zone_idx(ns, *slba);
+    assert(*zone_idx < n->num_zones);
+
+    return NVME_SUCCESS;
 }
 
 #endif

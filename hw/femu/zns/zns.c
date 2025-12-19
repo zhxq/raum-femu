@@ -1,16 +1,5 @@
 #include "./zns.h"
 
-#define FEMU_DEBUG_FTL
-
-#ifdef FEMU_DEBUG_FTL
-FILE * femu_log_file;
-#define write_log(fmt, ...) \
-    do { if (femu_log_file) {fprintf(femu_log_file, fmt, ## __VA_ARGS__); fflush(NULL);}} while (0)
-#else
-#define write_log(fmt, ...) \
-    do { if (0) {printf(fmt, ## __VA_ARGS__);}} while (0)
-#endif
-
 #define MIN_DISCARD_GRANULARITY     (4 * KiB)
 #define NVME_DEFAULT_ZONE_SIZE      (128 * MiB)
 #define NVME_DEFAULT_MAX_AZ_SIZE    (128 * KiB)
@@ -486,15 +475,12 @@ static void zns_zoned_zrwa_implicit_flush(FemuCtrl *n, NvmeNamespace *ns, NvmeZo
                                            uint32_t nlbc);
 
 
-static uint64_t zns_advance_zone_wp(NvmeNamespace *ns, NvmeZone *zone, uint32_t nlb)
+static void zns_advance_zone_wp(NvmeNamespace *ns, NvmeZone *zone, uint32_t nlb)
 {
-    uint64_t result = zone->w_ptr;
     uint8_t zs;
-    if (!(zone->d.za & NVME_ZA_ZRWA_VALID)) {
-        zone->w_ptr += nlb;
-    }
+    zone->d.wp += nlb;
 
-    if (zone->w_ptr < zns_zone_wr_boundary(zone)) {
+    if (zone->d.wp == zns_zone_wr_boundary(zone)) {
         // L2068
         // Calling nvme_zrm_finish() in QEMU ctrl.c
         zs = zns_get_zone_state(zone);
@@ -508,7 +494,6 @@ static uint64_t zns_advance_zone_wp(NvmeNamespace *ns, NvmeZone *zone, uint32_t 
         }
     }
 
-    return result;
 }
 
 static void zns_finalize_zoned_write(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req, bool failed)
@@ -885,28 +870,7 @@ out:
     return status;
 }
 
-static uint16_t zns_get_mgmt_zone_slba_idx(FemuCtrl *n, NvmeCmd *c,
-                                           uint64_t *slba, uint32_t *zone_idx)
-{
-    NvmeNamespace *ns = &n->namespaces[0];
-    uint32_t dw10 = le32_to_cpu(c->cdw10);
-    uint32_t dw11 = le32_to_cpu(c->cdw11);
 
-    if (!n->zoned) {
-        return NVME_INVALID_OPCODE | NVME_DNR;
-    }
-
-    *slba = ((uint64_t)dw11) << 32 | dw10;
-    if (unlikely(*slba >= ns->id_ns.nsze)) {
-        *slba = 0;
-        return NVME_LBA_RANGE | NVME_DNR;
-    }
-
-    *zone_idx = zns_zone_idx(ns, *slba);
-    assert(*zone_idx < n->num_zones);
-
-    return NVME_SUCCESS;
-}
 
 static inline uint16_t zns_check_bounds(NvmeNamespace *ns, uint64_t slba,
                                         uint32_t nlb)
@@ -987,7 +951,10 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
              }
              slba = zone->w_ptr;
         }
-        res->slba = zns_advance_zone_wp(ns, zone, nlb);
+        res->slba = slba;
+        if (!(zone->d.za & NVME_ZA_ZRWA_VALID)) {
+            zone->w_ptr += nlb;
+        }
     }
     else
     {
@@ -1024,7 +991,7 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         zns_finalize_zoned_write(n, ns, req, false);
     }
 
-    n->zns->active_zone = zns_zone_idx(ns,slba);
+    n->zns->active_zone = zns_zone_idx(ns, slba);
     return NVME_SUCCESS;
 err:
     return status | NVME_DNR;
@@ -1039,31 +1006,57 @@ static uint16_t zns_zone_mgmt_send_zrwa_flush(FemuCtrl *n, NvmeZone *zone,
     uint32_t nlb = elba - wp + 1;
     uint16_t status;
 
+    write_log("zrwa 1\n");
+
 
     if (!(ozcs & NVME_ID_NS_ZONED_OZCS_ZRWASUP)) {
         return NVME_INVALID_ZONE_OP | NVME_DNR;
     }
 
+    write_log("zrwa 2\n");
+
     if (!(zone->d.za & NVME_ZA_ZRWA_VALID)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+
+    write_log("zrwa 3\n");
 
     if (elba < wp || elba > wp + n->zns->zrwas) {
         return NVME_ZONE_BOUNDARY_ERROR | NVME_DNR;
     }
 
+    write_log("zrwa 4\n");
+
     if (nlb % n->zns->zrwafg) {
+        
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+
+    write_log("zrwa 5\n");
 
     status = zns_zrm_open_flags(n, ns, zone, NVME_ZRM_AUTO);
     if (status) {
         return status;
     }
 
-    zone->w_ptr += nlb;
+    write_log("zrwa 6\n");
+
+    // 3.4.3.1.3 Flush Explicit ZRWA Range
+    // On successful completion of a command for which 
+    // the SLBA is not the highest-numbered LBA of the zone, 
+    // the write pointer for that zone shall be set to 
+    // one greater than the value in the SLBA field.
+    zone->w_ptr += nlb + 1;
+
+    write_log("zrwa 7\n");
+
+    n->zns->active_zone = zns_zone_idx(ns, elba);
+
+    write_log("zrwa 8\n");
 
     zns_advance_zone_wp(ns, zone, nlb);
+
+    write_log("zrwa 9\n");
 
     return NVME_SUCCESS;
 }
@@ -1091,6 +1084,8 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
 
     req->status = NVME_SUCCESS;
 
+    write_log("Received Zone Mgmt Send Action %u, all = %u, cdw13 = %u\n", action, all, dw13);
+
     if (!all) {
         status = zns_get_mgmt_zone_slba_idx(n, cmd, &slba, &zone_idx);
         if (status) {
@@ -1098,17 +1093,23 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         }
     }
 
+    write_log("zone_idx = %u\n", zone_idx);
+
     zone = &n->zone_array[zone_idx];
-    if (slba != zone->d.zslba) {
+    if (slba != zone->d.zslba && action != NVME_ZONE_ACTION_ZRWA_FLUSH) {
+        write_log("slba 0x%"PRIx64" != zone->d.zslba 0x%"PRIx64"\n", slba, zone->d.zslba);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
+    write_log("Switching by Zone Mgmt Send Action %u\n", action);
     switch (action) {
     case NVME_ZONE_ACTION_OPEN:
         if (all) {
             proc_mask = NVME_PROC_CLOSED_ZONES;
         }
+        write_log("Trying to open zone %u\n", zone_idx);
         status = zns_do_zone_op(ns, zone, proc_mask, zns_open_zone, req);
+        write_log("Status: %u\n", status);
         break;
     case NVME_ZONE_ACTION_CLOSE:
         if (all) {
@@ -1320,6 +1321,7 @@ static uint16_t zns_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
 {
     switch (cmd->opcode) {
     default:
+        write_log("From ZNS admin cmd\n");
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
 }
@@ -1338,7 +1340,7 @@ static uint16_t zns_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     case NVME_CMD_ZONE_MGMT_RECV:
         return zns_zone_mgmt_recv(n, req);
     }
-
+    write_log("From ZNS io cmd\n");
     return NVME_INVALID_OPCODE | NVME_DNR;
 }
 
@@ -1408,6 +1410,8 @@ static void zns_init_params(FemuCtrl *n)
     id_zns->num_ch = n->zns_params.zns_num_ch;
     id_zns->num_lun = n->zns_params.zns_num_lun;
     id_zns->num_plane = n->zns_params.zns_num_plane;
+    printf("num planes: %d\n", n->zns_params.zns_num_plane);
+    assert(n->zns_params.zns_num_plane == 1);
     id_zns->num_blk = n->zns_params.zns_num_blk;
     id_zns->num_page = n->ns_size/ZNS_PAGE_SIZE/(id_zns->num_ch*id_zns->num_lun*id_zns->num_blk);
     id_zns->lbasz = 1 << zns_ns_lbads(&n->namespaces[0]);
@@ -1514,7 +1518,7 @@ static void zns_init(FemuCtrl *n, Error **errp)
     femu_log_file = fopen(str, "w+");
     #endif
 
-    write_log("zns_init start");
+    write_log("zns_init start\n");
 
 
     if (n->zns_params.zns_zrwas) {
@@ -1530,7 +1534,7 @@ static void zns_init(FemuCtrl *n, Error **errp)
             n->zns_params.zns_zrwafg = ZNS_PAGE_SIZE;
         }
 
-        if (n->zns_params.zns_num_zrwa % n->zns_params.zns_zrwafg) {
+        if (n->zns_params.zns_zrwas % n->zns_params.zns_zrwafg) {
             error_setg(errp, "zone random write area size (zoned.zrwas "
                         "%"PRIu16") must be a multiple of the zone random "
                         "write area flush granularity (zoned.zrwafg, "
@@ -1551,19 +1555,19 @@ static void zns_init(FemuCtrl *n, Error **errp)
         }
     }
 
-    write_log("zns_init set_ctrl");
+    write_log("zns_init set_ctrl\n");
     zns_set_ctrl(n);
-    write_log("zns_init init_params");
+    write_log("zns_init init_params\n");
     zns_init_params(n);
-    write_log("zns_init zone_cap");
+    write_log("zns_init zone_cap\n");
     zns_init_zone_cap(n);
 
-    write_log("zns_init zone geo");
+    write_log("zns_init zone geo\n");
     if (zns_init_zone_geometry(ns, errp) != 0) {
         return;
     }
 
-    write_log("zns_init zone ident");
+    write_log("zns_init zone ident\n");
     zns_init_zone_identify(n, ns, 0);
 }
 

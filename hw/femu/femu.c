@@ -183,6 +183,10 @@ static void nvme_process_db_admin(FemuCtrl *n, hwaddr addr, int val)
             return;
         }
         sq = n->sq[qid];
+
+        printf("SQID: %u\n", sq->sqid);
+        fflush(NULL);
+
         if (new_val >= sq->size) {
             return;
         }
@@ -248,11 +252,31 @@ static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data, unsigned s
     FemuCtrl *n = (FemuCtrl *)opaque;
     if (addr < sizeof(n->bar)) {
         nvme_write_bar(n, addr, data, size);
-    } else if (addr >= 0x1000 && addr < 0x1008) {
-        nvme_process_db_admin(n, addr, data);
-    } else {
-        nvme_process_db_io(n, addr, data);
+    } 
+    // else if (addr >= 0x1000 && addr < 0x1008) {
+    //     printf("admin addr: 0x%"PRIx64"\n", addr);
+    //     fflush(NULL);
+    //     nvme_process_db_admin(n, addr, data);
+    // } else {
+    //     nvme_process_db_io(n, addr, data);
+    // }
+    else{
+        uint32_t stride_bytes = 1U << (2 + n->db_stride); /* (4 << DSTRD) */
+        uint32_t qid;
+        // bool is_cq_db;
+        if (addr & (stride_bytes - 1)) {
+            return;
+        }
+        // is_cq_db = (((addr - 0x1000) / stride_bytes) & 1) != 0;
+        qid = ((addr - 0x1000) / stride_bytes) >> 1;
+        if (qid == 0) {
+            nvme_process_db_admin(n, addr, data);
+        }else{
+            nvme_process_db_io(n, addr, data);
+        }
     }
+
+
 }
 
 static void nvme_cmb_write(void *opaque, hwaddr addr, uint64_t data, unsigned size)
@@ -664,9 +688,9 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("lnum_lun", FemuCtrl, oc_params.num_lun, 8),
     DEFINE_PROP_UINT8("lnum_pln", FemuCtrl, oc_params.num_pln, 2),
     DEFINE_PROP_UINT16("lmetasize", FemuCtrl, oc_params.sos, 16),
-    DEFINE_PROP_UINT8("zns_num_ch", FemuCtrl, zns_params.zns_num_ch, 2),
-    DEFINE_PROP_UINT8("zns_num_lun", FemuCtrl, zns_params.zns_num_lun, 4),
-    DEFINE_PROP_UINT8("zns_num_plane", FemuCtrl, zns_params.zns_num_plane, 2),
+    DEFINE_PROP_UINT8("zns_num_ch", FemuCtrl, zns_params.zns_num_ch, 8),
+    DEFINE_PROP_UINT8("zns_num_lun", FemuCtrl, zns_params.zns_num_lun, 8),
+    DEFINE_PROP_UINT8("zns_num_plane", FemuCtrl, zns_params.zns_num_plane, 1),
     DEFINE_PROP_UINT8("zns_num_blk", FemuCtrl, zns_params.zns_num_blk, 32),
     DEFINE_PROP_INT32("zns_flash_type", FemuCtrl, zns_params.zns_flash_type, QLC),
     DEFINE_PROP_UINT32("zns_num_zrwa", FemuCtrl, zns_params.zns_num_zrwa, 0),

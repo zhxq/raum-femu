@@ -339,8 +339,10 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
 
     if (zone->d.za & NVME_ZA_ZRWA_VALID) {
         uint64_t ezrwa = zone->w_ptr + 2 * n->zns->zrwas;
+        write_log("eizwa = 0x%"PRIx64"\n", ezrwa);
 
         if (slba < zone->w_ptr || slba + nlb > ezrwa) {
+            write_log("slba = 0x%"PRIx64", zone->w_ptr = 0x%"PRIx64", (slba + nlb) = 0x%"PRIx64", eizwa = 0x%"PRIx64"\n", slba, zone->w_ptr, slba + nlb, ezrwa);
             status = NVME_ZONE_INVALID_WRITE;
         }
     }else{
@@ -353,6 +355,7 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
                 status = NVME_INVALID_FIELD;
             }
         } else if (unlikely(slba != zone->w_ptr)) {
+            write_log("slba != zone->w_ptr!\nslba = 0x%"PRIx64", zone->w_ptr = 0x%"PRIx64"\n", slba, zone->w_ptr);
             status = NVME_ZONE_INVALID_WRITE;
         }
     }
@@ -1022,13 +1025,14 @@ static uint16_t zns_zone_mgmt_send_zrwa_flush(FemuCtrl *n, NvmeZone *zone,
     write_log("zrwa 3\n");
 
     if (elba < wp || elba > wp + n->zns->zrwas) {
+        write_log("elba=0x%"PRIx64", wp=0x%"PRIx64", wp + n->zns->zrwas=0x%"PRIx64"\n", elba, wp, wp + n->zns->zrwas);
         return NVME_ZONE_BOUNDARY_ERROR | NVME_DNR;
     }
 
     write_log("zrwa 4\n");
 
     if (nlb % n->zns->zrwafg) {
-        
+        write_log("nlb=0x%"PRIx32", n->zns->zrwafg=0x%"PRIx16"\n", nlb, n->zns->zrwafg);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -1046,7 +1050,7 @@ static uint16_t zns_zone_mgmt_send_zrwa_flush(FemuCtrl *n, NvmeZone *zone,
     // the SLBA is not the highest-numbered LBA of the zone, 
     // the write pointer for that zone shall be set to 
     // one greater than the value in the SLBA field.
-    zone->w_ptr += nlb + 1;
+    zone->w_ptr += nlb;
 
     write_log("zrwa 7\n");
 

@@ -606,25 +606,23 @@ enum NvmeZoneProcessingMask {
 
 static uint16_t zns_zrm_open_flags(FemuCtrl *n, NvmeNamespace *ns,
                                     NvmeZone *zone, int flags){
+    int act = 0;
     uint16_t status;
     switch (zns_get_zone_state(zone)) {
     case NVME_ZONE_STATE_EMPTY:
-        status = zns_aor_check(ns, 1, 1, (flags & NVME_ZRM_ZRWA) ? 1 : 0);
-        if (status != NVME_SUCCESS) {
-            return status;
-        }
-        zns_aor_inc_active(ns);
-        zns_aor_inc_open(ns);
 
-        if (flags & NVME_ZRM_AUTO) {
-            zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_IMPLICITLY_OPEN);
-            return NVME_SUCCESS;
-        }
+        act = 1;
+        
+        
         /* fall through */
     case NVME_ZONE_STATE_CLOSED:
         status = zns_aor_check(ns, 0, 1, (flags & NVME_ZRM_ZRWA) ? 1 : 0);
         if (status != NVME_SUCCESS) {
             return status;
+        }
+
+        if (act) {
+            zns_aor_inc_active(ns);
         }
         zns_aor_inc_open(ns);
 
@@ -1101,7 +1099,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
 
     zone = &n->zone_array[zone_idx];
     if (slba != zone->d.zslba && action != NVME_ZONE_ACTION_ZRWA_FLUSH) {
-        write_log("slba 0x%"PRIx64" != zone->d.zslba 0x%"PRIx64"\n", slba, zone->d.zslba);
+        write_log("zone: %u, slba 0x%"PRIx64" != zone->d.zslba 0x%"PRIx64"\n", zone_idx, slba, zone->d.zslba);
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 

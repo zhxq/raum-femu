@@ -1341,10 +1341,10 @@ static uint16_t zns_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
 static uint16_t zns_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeRequest *req)
 {
-    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
-    uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
-    uint64_t slba = le64_to_cpu(rw->slba);
-    uint8_t is_write = (rw->opcode == NVME_CMD_WRITE) ? 1 : 0;
+    // NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+    // uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
+    // uint64_t slba = le64_to_cpu(rw->slba);
+    // uint8_t is_write = (rw->opcode == NVME_CMD_WRITE) ? 1 : 0;
     switch (cmd->opcode) {
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:

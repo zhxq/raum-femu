@@ -339,7 +339,7 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
 
     if (zone->d.za & NVME_ZA_ZRWA_VALID) {
         uint64_t ezrwa = zone->w_ptr + 2 * n->zns->zrwas;
-        write_log("eizwa = 0x%"PRIx64"\n", ezrwa);
+        // write_log("eizwa = 0x%"PRIx64"\n", ezrwa);
 
         if (slba < zone->w_ptr || slba + nlb > ezrwa) {
             write_log("slba = 0x%"PRIx64", zone->w_ptr = 0x%"PRIx64", (slba + nlb) = 0x%"PRIx64", eizwa = 0x%"PRIx64"\n", slba, zone->w_ptr, slba + nlb, ezrwa);
@@ -508,6 +508,7 @@ static void zns_finalize_zoned_write(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest
 
     slba = le64_to_cpu(rw->slba);
     nlb = le16_to_cpu(rw->nlb) + 1;
+    // write_log("zns_finalize_zoned_write slba=0x%"PRIx64", nlb=0x%"PRIx32"\n", slba, nlb);
     zone = zns_get_zone_by_slba(ns, slba);
 
     if (zone->d.za & NVME_ZA_ZRWA_VALID) {
@@ -557,6 +558,9 @@ static uint64_t zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
     uint32_t zone_idx = zns_zone_idx(ns, zone->d.zslba);
     uint64_t erase_latency = 0;
 
+
+    write_screen("nvme%s Before reset - open zones: %d, active zones: %d\n", n->serial, n->nr_open_zones, n->nr_active_zones);
+    write_log("nvme%s Before reset - open zones: %d, active zones: %d\n", n->serial, n->nr_open_zones, n->nr_active_zones);
     switch (zns_get_zone_state(zone)) {
     case NVME_ZONE_STATE_EXPLICITLY_OPEN:
         /* fall through */
@@ -580,6 +584,9 @@ static uint64_t zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
     default:
         break;
     }
+
+    write_screen("nvme%s After reset - open zones: %d, active zones: %d\n", n->serial, n->nr_open_zones, n->nr_active_zones);
+    write_log("nvme%s After reset - open zones: %d, active zones: %d\n", n->serial, n->nr_open_zones, n->nr_active_zones);
 
     erase_latency = zns_zone_reset(zns, zone_idx, n->zone_size, zns->lbasz, req->stime);
 
@@ -610,13 +617,10 @@ static uint16_t zns_zrm_open_flags(FemuCtrl *n, NvmeNamespace *ns,
     uint16_t status;
     switch (zns_get_zone_state(zone)) {
     case NVME_ZONE_STATE_EMPTY:
-
         act = 1;
-        
-        
         /* fall through */
     case NVME_ZONE_STATE_CLOSED:
-        status = zns_aor_check(ns, 0, 1, (flags & NVME_ZRM_ZRWA) ? 1 : 0);
+        status = zns_aor_check(ns, act, 1, (flags & NVME_ZRM_ZRWA) ? 1 : 0);
         if (status != NVME_SUCCESS) {
             return status;
         }
@@ -692,6 +696,8 @@ static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
                                 NvmeZoneState state, NvmeRequest *req)
 {
     FemuCtrl *n = ns->ctrl;
+    write_screen("nvme%s Before finish - open zones: %d, active zones: %d\n", n->serial, n->nr_open_zones, n->nr_active_zones);
+    write_log("nvme%s Before finish - open zones: %d, active zones: %d\n", n->serial, n->nr_open_zones, n->nr_active_zones);
     switch (state) {
     case NVME_ZONE_STATE_EXPLICITLY_OPEN:
         /* fall through */
@@ -713,6 +719,8 @@ static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_FULL);
         /* fall through */
     case NVME_ZONE_STATE_FULL:
+        write_screen("nvme%s After finish - open zones: %d, active zones: %d\n", n->serial, n->nr_open_zones, n->nr_active_zones);
+        // write_log("nvme%s After finish - open zones: %d, active zones: %d\n", n->serial, n->nr_open_zones, n->nr_active_zones);
         return NVME_SUCCESS;
     default:
         return NVME_ZONE_INVAL_TRANSITION;
@@ -1086,7 +1094,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
 
     req->status = NVME_SUCCESS;
 
-    write_log("Received Zone Mgmt Send Action %u, all = %u, cdw13 = %u\n", action, all, dw13);
+    write_log("nvme%s Received Zone Mgmt Send Action %u, all = %u, cdw13 = %u\n", n->serial, action, all, dw13);
 
     if (!all) {
         status = zns_get_mgmt_zone_slba_idx(n, cmd, &slba, &zone_idx);
@@ -1103,26 +1111,27 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    write_log("Switching by Zone Mgmt Send Action %u\n", action);
     switch (action) {
     case NVME_ZONE_ACTION_OPEN:
         if (all) {
             proc_mask = NVME_PROC_CLOSED_ZONES;
         }
-        write_log("Trying to open zone %u\n", zone_idx);
+        write_log("nvme%s Trying to open zone %u\n", n->serial, zone_idx);
         status = zns_do_zone_op(ns, zone, proc_mask, zns_open_zone, req);
-        write_log("Status: %u\n", status);
+        write_log("Status: 0x%x\n\n", status);
         break;
     case NVME_ZONE_ACTION_CLOSE:
         if (all) {
             proc_mask = NVME_PROC_OPENED_ZONES;
         }
+        write_log("nvme%s Trying to close zone %u\n\n", n->serial, zone_idx);
         status = zns_do_zone_op(ns, zone, proc_mask, zns_close_zone, req);
         break;
     case NVME_ZONE_ACTION_FINISH:
         if (all) {
             proc_mask = NVME_PROC_OPENED_ZONES | NVME_PROC_CLOSED_ZONES;
         }
+        write_log("nvme%s Trying to finish zone %u\n\n", n->serial, zone_idx);
         status = zns_do_zone_op(ns, zone, proc_mask, zns_finish_zone, req);
         break;
     case NVME_ZONE_ACTION_RESET:
@@ -1132,6 +1141,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
             proc_mask = NVME_PROC_OPENED_ZONES | NVME_PROC_CLOSED_ZONES |
                 NVME_PROC_FULL_ZONES;
         }
+        write_log("nvme%s Trying to reset zone %u\n\n", n->serial, zone_idx);
         *resets = 1;
         status = zns_do_zone_op(ns, zone, proc_mask, zns_reset_zone, req);
         (*resets)--;

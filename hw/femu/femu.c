@@ -381,7 +381,7 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     nvme_ns_init_identify(n, id_ns);
 
     lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    num_blks = n->ns_size / ((1 << id_ns->lbaf[lba_index].lbads));
+    num_blks = ns->size / ((1 << id_ns->lbaf[lba_index].lbads));
     id_ns->nuse = id_ns->ncap = id_ns->nsze = cpu_to_le64(num_blks);
 
     n->csi = NVME_CSI_NVM;
@@ -395,21 +395,31 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
 static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
 {
-    int i;
 
-    /* FIXME: FEMU only supports 1 namesapce now */
-    assert(n->num_namespaces == 1);
+    // Two namespaces: NS1 for ZNS, NS2 for URWA
+    
+    NvmeNamespace *ns = &n->namespaces[0];
+    ns->size = n->ns_size;
+    ns->start_block = 0;
+    ns->id = 1;
 
-    for (i = 0; i < n->num_namespaces; i++) {
-        NvmeNamespace *ns = &n->namespaces[i];
-        ns->size = n->ns_size;
-        ns->start_block = i * n->ns_size >> BDRV_SECTOR_BITS;
-        ns->id = i + 1;
+    if (nvme_init_namespace(n, ns, errp)) {
+        return 1;
+    }
+
+    // We have Unified Random Writable Area (URWA)
+    if (n->num_namespaces == 2){
+        ns = &n->namespaces[1];
+        // URWA size is exactly the same as ZRWA size
+        ns->size = n->zns_params.zns_zrwas * n->zns_params.zns_num_zrwa;
+        ns->start_block = n->ns_size >> BDRV_SECTOR_BITS;
+        ns->id = 2;
 
         if (nvme_init_namespace(n, ns, errp)) {
             return 1;
         }
     }
+    
 
     return 0;
 }
@@ -568,12 +578,19 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     bs_size = ((int64_t)n->memsz) * 1024 * 1024;
 
     init_dram_backend(&n->mbe, bs_size);
+
+    if (ZNSSD(n) && n->num_namespaces == 2){
+        // URWA enabled, initialize URWA
+        init_dram_backend(&n->urwa_mbe, n->zns_params.zns_zrwas * n->zns_params.zns_num_zrwa);
+        n->urwa_mbe->femu_mode = FEMU_NOSSD_MODE;
+    }
+
     n->mbe->femu_mode = n->femu_mode;
 
     n->completed = 0;
     n->start_time = time(NULL);
     n->reg_size = pow2ceil(0x1004 + 2 * (n->nr_io_queues + 1) * 4);
-    n->ns_size = bs_size / (uint64_t)n->num_namespaces;
+    n->ns_size = bs_size;
 
     /* Coperd: [1..nr_io_queues] are used as IO queues */
     n->sq = g_malloc0(sizeof(*n->sq) * (n->nr_io_queues + 1));

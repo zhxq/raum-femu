@@ -264,6 +264,7 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     uint64_t meta_size = nlb * ms;
     uint64_t elba = slba + nlb;
     uint16_t err;
+    SsdDramBackend *target = n->mbe;
     int ret;
 
     req->is_write = (rw->opcode == NVME_CMD_WRITE) ? 1 : 0;
@@ -285,7 +286,11 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
 
-    ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+    if (ZNSSD(n) && ns->id == 2){
+        target = n->urwa_mbe;
+    }
+
+    ret = backend_rw(target, &req->qsg, &data_offset, req->is_write);
     if (!ret) {
         return NVME_SUCCESS;
     }

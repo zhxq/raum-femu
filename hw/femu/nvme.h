@@ -1372,6 +1372,7 @@ typedef struct FemuCtrl {
 
     struct ssd      *ssd;
     SsdDramBackend  *mbe;
+    SsdDramBackend  *urwa_mbe;
     int             completed;
 
     char            devname[64];

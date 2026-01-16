@@ -1341,10 +1341,22 @@ static uint16_t zns_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
 static uint16_t zns_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                            NvmeRequest *req)
 {
+    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+    uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
+    uint64_t slba = le64_to_cpu(rw->slba);
+    uint8_t is_write = (rw->opcode == NVME_CMD_WRITE) ? 1 : 0;
     switch (cmd->opcode) {
     case NVME_CMD_READ:
     case NVME_CMD_WRITE:
-        return zns_nvme_rw(n, ns, cmd, req, false);
+        if (ns->id == 1){
+            // write_screen("Received ZNS %s! LBA: 0x%"PRIx64", len: 0x%"PRIx32"\n", is_write?"Write":"Read", slba, nlb);
+            return zns_nvme_rw(n, ns, cmd, req, false);
+        }else if (ns->id == 2){
+            // write_screen("Received URWA %s! LBA: 0x%"PRIx64", len: 0x%"PRIx32"\n", is_write?"Write":"Read", slba, nlb);
+            return nvme_rw(n, ns, cmd, req);
+        }
+        return NVME_INVALID_FIELD | NVME_DNR;
+        
     case NVME_CMD_ZONE_APPEND:
         return zns_nvme_rw(n, ns, cmd, req, true);
     case NVME_CMD_ZONE_MGMT_SEND:
@@ -1359,7 +1371,7 @@ static uint16_t zns_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 static void zns_set_ctrl_str(FemuCtrl *n)
 {
     static int fsid_zns = 0;
-    const char *zns_mn = "FEMU ZMS-SSD Controller [by Misao]";
+    const char *zns_mn = "FEMU ZNS SSD w/ URWA";
     const char *zns_sn = "vZNSSD";
 
     nvme_set_ctrl_name(n, zns_mn, zns_sn, &fsid_zns);

@@ -595,28 +595,33 @@ static void *ftl_thread(void *arg)
             }
 
             ftl_assert(req);
-            switch (req->cmd.opcode) {
-                // Fix bug: zone append not respecting configured delay
-                case NVME_CMD_ZONE_APPEND:
-                    /* Fall through */
-                case NVME_CMD_WRITE:
-                    lat = zns_write(n, zns, req);
-                    break;
-                case NVME_CMD_READ:
-                    lat = zns_read(n, zns, req);
-                    break;
-                case NVME_CMD_DSM:
-                    lat = 0;
-                    break;
-                case NVME_CMD_ZONE_MGMT_SEND:
-                    lat = zns_zone_mgmt_send_with_latency(n, zns, req);
-                default:
-                    //ftl_err("FTL received unkown request type, ERROR\n");
-                    ;
+            if (req->ns->id == 1){
+                switch (req->cmd.opcode) {
+                    // Fix bug: zone append not respecting configured delay
+                    case NVME_CMD_ZONE_APPEND:
+                        /* Fall through */
+                    case NVME_CMD_WRITE:
+                        lat = zns_write(n, zns, req);
+                        break;
+                    case NVME_CMD_READ:
+                        lat = zns_read(n, zns, req);
+                        break;
+                    case NVME_CMD_DSM:
+                        lat = 0;
+                        break;
+                    case NVME_CMD_ZONE_MGMT_SEND:
+                        lat = zns_zone_mgmt_send_with_latency(n, zns, req);
+                    default:
+                        //ftl_err("FTL received unkown request type, ERROR\n");
+                        ;
+                }
+                req->reqlat = lat;
+                req->expire_time += lat;
+            }else if(req->ns->id == 2){
+                // URWA, use SRAM Latency
+                req->reqlat = SRAM_WRITE_LATENCY_NS;
+                req->expire_time += SRAM_WRITE_LATENCY_NS;
             }
-
-            req->reqlat = lat;
-            req->expire_time += lat;
 
             rc = femu_ring_enqueue(zns->to_poller[i], (void *)&req, 1);
             if (rc != 1) {

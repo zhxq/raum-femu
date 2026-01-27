@@ -76,6 +76,9 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         }
 
         status = nvme_io_cmd(n, &cmd, req);
+        if (((NvmePassthruCmd *)(&req->cmd))->result == 0x80808080){
+            femu_log("1 0x80808080!!!!\n");
+        }
         if (status == NVME_SUCCESS) {
             req->status = status;
             int rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
@@ -167,6 +170,9 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
             break;
         }
 
+        if (((NvmePassthruCmd *)(&req->cmd))->result == 0x80808080){
+            femu_log("f 0x80808080!!!!\n");
+        }
         cq = n->cq[req->sq->sqid];
         if (!cq->is_active)
             continue;
@@ -510,7 +516,7 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     uint32_t nsid = le32_to_cpu(cmd->nsid);
 
     if (nsid == 0 || nsid > n->num_namespaces) {
-        femu_err("%s, NVME_INVALID_NSID %" PRIu32 "\n", __func__, nsid);
+        femu_err("%s, NVME_INVALID_NSID %" PRIu32 ", Opcode 0x%"PRIx16"\n", __func__, nsid, cmd->opcode);
         return NVME_INVALID_NSID | NVME_DNR;
     }
 

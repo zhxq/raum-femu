@@ -226,6 +226,7 @@ enum NvmeZoneSendAction {
     NVME_ZONE_ACTION_OFFLINE         = 0x05,
     NVME_ZONE_ACTION_SET_ZD_EXT      = 0x10,
     NVME_ZONE_ACTION_ZRWA_FLUSH      = 0x11,
+    NVME_ZONE_ACTION_RAUM_FLUSH      = 0x12,
 };
 
 enum {

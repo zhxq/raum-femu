@@ -658,7 +658,7 @@ static uint16_t zns_open_zone(NvmeNamespace *ns, NvmeZone *zone,
     int flags = 0;
     FemuCtrl *n = ns->ctrl;
     
-    if (cmd->zsflags & NVME_ZSFLAG_ZRWA_ALLOC) {
+    if (cmd->zsflags & NVME_ZSFLAG_ZRWA_ALLOC && n->num_namespaces == 1) {
         uint16_t ozcs = le16_to_cpu(n->id_ns_zoned->ozcs);
 
         if (!(ozcs & NVME_ID_NS_ZONED_OZCS_ZRWASUP)) {
@@ -1005,6 +1005,102 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 err:
     return status | NVME_DNR;
 }
+
+
+static uint16_t zns_nvme_raum_flush(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                           NvmeRequest *req)
+{
+    // NvmePassthruCmd64 *pcmd = (NvmePassthruCmd64 *)&req->cmd; 
+    NvmePassthruCmd *pcmd = (NvmePassthruCmd *)&req->cmd; 
+    NvmeNamespace *zns_ns = &n->namespaces[0];
+    // NvmeNamespace *raum_ns = &n->namespaces[1];
+    uint32_t flash_slba_low = le32_to_cpu(pcmd->cdw10);
+    uint32_t flash_slba_high = le32_to_cpu(pcmd->cdw11);
+    uint64_t flash_slba = (uint64_t)flash_slba_high << 32 | flash_slba_low;
+
+    uint32_t raum_slba_low = le32_to_cpu(pcmd->cdw14);
+    uint32_t raum_slba_high = le32_to_cpu(pcmd->cdw15);
+    uint64_t raum_slba = (uint64_t)raum_slba_high << 32 | raum_slba_low;
+    uint32_t nlb = le32_to_cpu(pcmd->cdw12) + 1;
+    uint64_t data_size = zns_l2b(zns_ns, nlb);
+    uint64_t flash_data_offset, raum_data_offset;
+    uint16_t status;
+    bool append = true;
+
+    NvmeZone *zone;
+    NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
+    assert(n->zoned);
+    // Fix zone append not working as expected
+    req->is_write = true;
+    // femu_log("zns_nvme_raum_flush 1 flash_slba 0x%"PRIx64", raum_slba 0x%"PRIx64"\n", flash_slba, raum_slba);
+    status = nvme_check_mdts(n, data_size);
+    if (status) {
+        goto err;
+    }
+    // femu_log("zns_nvme_raum_flush 2\n");
+    status = zns_check_bounds(zns_ns, flash_slba, nlb);
+    if (status) {
+        goto err;
+    }
+    // femu_log("zns_nvme_raum_flush 3\n");
+    zone = zns_get_zone_by_slba(zns_ns, flash_slba);
+    // femu_log("zns_nvme_raum_flush 4\n");
+    status = zns_check_zone_write(n, zns_ns, zone, flash_slba, nlb, append);
+    // femu_log("zns_nvme_raum_flush 5\n");
+    if (status) {
+        femu_err("Misao check zone write failed with status (%u)\n",status);
+        goto err;
+    }
+
+    if(append)
+    {
+        // femu_log("zns_nvme_raum_flush is append\n");
+        if (unlikely(zone->d.za & NVME_ZA_ZRWA_VALID)) {
+            return NVME_INVALID_ZONE_OP | NVME_DNR;
+        }
+        status = zns_auto_open_zone(n, ns, zone, req);
+        if(status){
+            goto err;
+        }
+        flash_slba = zone->w_ptr;
+    }
+    // femu_log("zns_nvme_raum_flush set result\n");
+    // write_log("zns_nvme_raum_flush set result\n");
+    pcmd->result = 0x80808080;
+    res->slba = flash_slba;
+    if (!(zone->d.za & NVME_ZA_ZRWA_VALID)) {
+        zone->w_ptr += nlb;
+    }
+    // femu_log("zns_nvme_raum_flush 6\n");
+
+    flash_data_offset = zns_l2b(zns_ns, flash_slba);
+    // status = zns_map_dptr(n, data_size, req);
+    // if (status) {
+    //     goto err;
+    // }
+    // femu_log("zns_nvme_raum_flush 7\n");
+
+    raum_data_offset = raum_slba << 9;
+
+    memcpy(n->mbe->logical_space + flash_data_offset, n->urwa_mbe->logical_space + raum_data_offset, nlb << 9);
+    // femu_log("zns_nvme_raum_flush 8\n");
+
+    // backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+
+    
+    // Definitely no ZRWA, so just advance
+    // zns_finalize_zoned_write(n, zns_ns, req, false);
+    // femu_log("zns_nvme_raum_flush 9\n");
+    zns_advance_zone_wp(ns, zone, nlb);
+
+    n->zns->active_zone = zns_zone_idx(ns, flash_slba);
+    // femu_log("zns_nvme_raum_flush 10\n");
+    return NVME_SUCCESS;
+err:
+    return status | NVME_DNR;
+}
+
+
 
 static uint16_t zns_zone_mgmt_send_zrwa_flush(FemuCtrl *n, NvmeZone *zone,
                                                uint64_t elba, NvmeRequest *req)
@@ -1356,7 +1452,12 @@ static uint16_t zns_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             return nvme_rw(n, ns, cmd, req);
         }
         return NVME_INVALID_FIELD | NVME_DNR;
-        
+    case NVME_CMD_FLUSH_RAUM:
+        if (ns->id == 2){
+            // write_screen("Received URWA %s! LBA: 0x%"PRIx64", len: 0x%"PRIx32"\n", is_write?"Write":"Read", slba, nlb);
+            return zns_nvme_raum_flush(n, ns, cmd, req);
+        }
+        return NVME_INVALID_FIELD | NVME_DNR;
     case NVME_CMD_ZONE_APPEND:
         return zns_nvme_rw(n, ns, cmd, req, true);
     case NVME_CMD_ZONE_MGMT_SEND:

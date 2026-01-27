@@ -342,6 +342,7 @@ enum NvmeIoCommands {
     NVME_CMD_ZONE_MGMT_SEND     = 0x79,
     NVME_CMD_ZONE_MGMT_RECV     = 0x7a,
     NVME_CMD_ZONE_APPEND        = 0x7d,
+    NVME_CMD_FLUSH_RAUM         = 0x80,
     NVME_CMD_OC_ERASE           = 0x90,
     NVME_CMD_OC_WRITE           = 0x91,
     NVME_CMD_OC_READ            = 0x92,
@@ -431,6 +432,50 @@ typedef struct NvmeRwCmd {
     uint16_t    apptag;
     uint16_t    appmask;
 } NvmeRwCmd;
+
+typedef struct NvmePassthruCmd {
+    uint8_t     opcode;
+    uint8_t     flags;
+    uint16_t	rsvd1;
+	uint32_t	nsid;
+	uint32_t	cdw2;
+	uint32_t	cdw3;
+	uint64_t	metadata;
+	uint64_t	addr;
+	uint32_t	metadata_len;
+	uint32_t	data_len;
+	uint32_t	cdw10;
+	uint32_t	cdw11;
+	uint32_t	cdw12;
+	uint32_t	cdw13;
+	uint32_t	cdw14;
+	uint32_t	cdw15;
+	uint32_t	timeout_ms;
+	uint32_t	result;
+} NvmePassthruCmd;
+
+
+typedef struct NvmePassthruCmd64 {
+	uint8_t	opcode;
+	uint8_t	flags;
+	uint16_t	rsvd1;
+	uint32_t	nsid;
+	uint32_t	cdw2;
+	uint32_t	cdw3;
+	uint64_t	metadata;
+	uint64_t	addr;
+	uint32_t	metadata_len;
+	uint32_t	data_len;
+	uint32_t	cdw10;
+	uint32_t	cdw11;
+	uint32_t	cdw12;
+	uint32_t	cdw13;
+	uint32_t	cdw14;
+	uint32_t	cdw15;
+	uint32_t	timeout_ms;
+	uint32_t    rsvd2;
+	uint64_t	result;
+} NvmePassthruCmd64;
 
 enum {
     NVME_RW_LR                  = 1 << 15,
@@ -1556,7 +1601,7 @@ static inline uint16_t nvme_check_mdts(FemuCtrl *n, size_t len)
     do { fprintf(stderr, "[FEMU] Err: " fmt, ## __VA_ARGS__); } while (0)
 
 #define femu_log(fmt, ...) \
-    do { printf("[FEMU] Log: " fmt, ## __VA_ARGS__); } while (0)
+    do { printf("[FEMU] Log: " fmt, ## __VA_ARGS__); fflush(NULL);} while (0)
 
 
 #endif /* __FEMU_NVME_H */

@@ -496,6 +496,92 @@ static uint64_t zns_write(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
     return maxlat;
 }
 
+
+static uint64_t zns_raum_flush(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
+{
+    struct ppa ppa, oldppa;
+    NvmePassthruCmd *pcmd = (NvmePassthruCmd *)&req->cmd; 
+    // NvmeNamespace zns_ns = n->namespaces[0];
+    // NvmeNamespace raum_ns = n->namespaces[1];
+    req->status = NVME_SUCCESS;
+    uint64_t sublat = 0, maxlat = 0;
+    uint32_t flash_slba_low = le32_to_cpu(pcmd->cdw10);
+    uint32_t flash_slba_high = le32_to_cpu(pcmd->cdw11);
+    uint64_t flash_slba = (uint64_t)flash_slba_high << 32 | flash_slba_low;
+    uint32_t nlb = le32_to_cpu(pcmd->cdw12);
+
+    uint64_t secs_per_pg = LOGICAL_PAGE_SIZE / zns->lbasz;
+    uint64_t start_lpn = flash_slba / secs_per_pg;
+    uint64_t end_lpn = (flash_slba + nlb - 1) / secs_per_pg;
+
+    // uint32_t raum_slba_low = le32_to_cpu(pcmd->cdw14);
+    // uint32_t raum_slba_high = le32_to_cpu(pcmd->cdw15);
+    // uint64_t raum_slba = (uint64_t)raum_slba_high << 32 | raum_slba_low;
+
+    uint64_t lpn;
+
+    
+    int subpage = 0;
+    // int wcidx = zns_get_wcidx(zns);
+
+    // NvmeZone *zone = zns_get_zone_by_slba(zns_ns, flash_slba);
+
+    // if(wcidx == -1)
+    // {
+    //     //need flush
+    //     wcidx = 0;
+    //     uint64_t t_used = zns->cache.write_cache[wcidx].used;
+    //     for(i = 0; i < zns->cache.num_wc; i++)
+    //     {
+    //         if(zns->cache.write_cache[i].used == 0)
+    //         {
+    //             t_used = 0;
+    //             wcidx = i; //free wc！
+    //             break;
+    //         }
+    //         if(zns->cache.write_cache[i].used > t_used)
+    //         {
+    //             t_used = zns->cache.write_cache[i].used;
+    //             wcidx = i;
+    //         }
+    //     }
+    //     if (t_used) maxlat = zns_wc_flush(zns, wcidx, USER_IO, req->stime);
+    //     zns->cache.write_cache[wcidx].sblk = zns->active_zone;
+    // }
+
+    for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        // write_log("RAUM flush to lpn 0x%"PRIx64", current lpn: 0x%"PRIx64"\n", flushing_lpn, lpn);
+        ppa = get_new_page(zns);
+        ppa.g.pl = 0;
+        ppa.g.pg = get_blk(zns, &ppa)->page_wp;
+        get_blk(zns, &ppa)->page_wp++;
+        
+        oldppa = get_maptbl_ent(zns, lpn);
+        if (mapped_ppa(&oldppa)) {
+            /* FIXME: Misao: update old page information*/
+        }
+        ppa.g.spg = subpage;
+        /* update maptbl */
+        set_maptbl_ent(zns, lpn, &ppa);
+        // ftl_debug("[F] lpn:\t%lu\t-->ch:\t%u\tlun:\t%u\tpl:\t%u\tblk:\t%u\tpg:\t%u\tsubpg:\t%u\tlat\t%lu\n",lpn,ppa.g.ch,ppa.g.fc,ppa.g.pl,ppa.g.blk,ppa.g.pg,ppa.g.spg,sublat);
+        //FIXME Misao: identify padding page
+        if(ppa.g.V)
+        {
+            struct nand_cmd swr;
+            swr.type = USER_IO;
+            swr.cmd = NAND_WRITE;
+            swr.stime = req->stime;
+            /* get latency statistics */
+            sublat = zns_advance_status(zns, &ppa, &swr);
+            sublat += SRAM_READ_LATENCY_NS;
+            // Assume DRAM latency is hidden by Die latency
+            maxlat = (sublat > maxlat) ? sublat : maxlat;
+        }
+    }
+
+    return maxlat;
+}
+
 static uint64_t zns_zone_mgmt_send_with_latency(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
 {
     NvmeCmd *cmd = (NvmeCmd *)&req->cmd;
@@ -619,8 +705,16 @@ static void *ftl_thread(void *arg)
                 req->expire_time += lat;
             }else if(req->ns->id == 2){
                 // URWA, use SRAM Latency
-                req->reqlat = SRAM_WRITE_LATENCY_NS;
-                req->expire_time += SRAM_WRITE_LATENCY_NS;
+                
+                if (req->cmd.opcode == NVME_CMD_FLUSH_RAUM){
+                    lat = zns_raum_flush(n, zns, req);
+                    req->reqlat = lat;
+                    req->expire_time += lat;
+                }else{
+                    req->reqlat = SRAM_WRITE_LATENCY_NS;
+                    req->expire_time += SRAM_WRITE_LATENCY_NS;
+                }
+                
             }
 
             rc = femu_ring_enqueue(zns->to_poller[i], (void *)&req, 1);

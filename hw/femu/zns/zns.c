@@ -2,7 +2,7 @@
 
 #define MIN_DISCARD_GRANULARITY     (4 * KiB)
 #define NVME_DEFAULT_ZONE_SIZE      (128 * MiB)
-#define NVME_DEFAULT_MAX_AZ_SIZE    (128 * KiB)
+#define NVME_DEFAULT_MAX_AZ_SIZE    (256 * KiB)
 
 static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
 {
@@ -351,6 +351,13 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
             if (unlikely(slba != zone->d.zslba)) {
                 status = NVME_INVALID_FIELD;
             }
+            // Note: previously failing here
+            // Related to NVME_DEFAULT_MAX_AZ_SIZE (originally 128k)
+            // n->zasl = 5 (should be)
+            // n->page_size << n->zasl = 4k * 32 = 128k
+            // But we need 4k * 64 = 256k
+            // Now fixed
+            
             if (zns_l2b(ns, nlb) > (n->page_size << n->zasl)) {
                 status = NVME_INVALID_FIELD;
             }

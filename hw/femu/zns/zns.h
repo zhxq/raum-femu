@@ -3,10 +3,10 @@
 
 #define SPG_BITS    (2)
 #define PG_BITS     (16)
-#define BLK_BITS    (32)
+#define BLK_BITS    (16)
 #define PL_BITS     (1)
-#define FC_BITS     (2)
-#define CH_BITS     (1)
+#define FC_BITS     (8)
+#define CH_BITS     (8)
 
 #include "../nvme.h"
 #include "../write_log.h"
@@ -132,6 +132,9 @@ struct zns_write_cache{
 struct zns_sram{
     int num_wc;
     struct zns_write_cache* write_cache;
+    uint64_t raum_cache_start_lpn;
+    uint64_t raum_cache_end_lpn;
+    bool go_flush;
 };
 
 struct zns_ssd {

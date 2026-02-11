@@ -475,7 +475,8 @@ static uint64_t zns_write(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
                 // Assume DRAM latency is hidden by Die latency
                 maxlat = (sublat > maxlat) ? sublat : maxlat;
             }
-
+            /* need to advance the write pointer here */
+            zns_advance_write_pointer(zns);
 
         }else{
             if(zns->cache.write_cache[wcidx].used==zns->cache.write_cache[wcidx].cap)
@@ -496,61 +497,19 @@ static uint64_t zns_write(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
     return maxlat;
 }
 
-
-static uint64_t zns_raum_flush(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
-{
-    struct ppa ppa, oldppa;
-    NvmePassthruCmd *pcmd = (NvmePassthruCmd *)&req->cmd; 
-    // NvmeNamespace zns_ns = n->namespaces[0];
-    // NvmeNamespace raum_ns = n->namespaces[1];
-    req->status = NVME_SUCCESS;
-    uint64_t sublat = 0, maxlat = 0;
-    uint32_t flash_slba_low = le32_to_cpu(pcmd->cdw10);
-    uint32_t flash_slba_high = le32_to_cpu(pcmd->cdw11);
-    uint64_t flash_slba = (uint64_t)flash_slba_high << 32 | flash_slba_low;
-    uint32_t nlb = le32_to_cpu(pcmd->cdw12);
-
-    uint64_t secs_per_pg = LOGICAL_PAGE_SIZE / zns->lbasz;
-    uint64_t start_lpn = flash_slba / secs_per_pg;
-    uint64_t end_lpn = (flash_slba + nlb - 1) / secs_per_pg;
-
-    // uint32_t raum_slba_low = le32_to_cpu(pcmd->cdw14);
-    // uint32_t raum_slba_high = le32_to_cpu(pcmd->cdw15);
-    // uint64_t raum_slba = (uint64_t)raum_slba_high << 32 | raum_slba_low;
-
+static uint64_t zns_raum_flush_buffer(FemuCtrl *n, struct zns_ssd *zns, uint64_t stime){
     uint64_t lpn;
-
-    
+    uint64_t start_lpn = zns->cache.raum_cache_start_lpn;
+    uint64_t end_lpn = zns->cache.raum_cache_end_lpn;
+    uint64_t sublat = 0, maxlat = 0;
+    struct ppa ppa, oldppa;
     int subpage = 0;
-    // int wcidx = zns_get_wcidx(zns);
 
-    // NvmeZone *zone = zns_get_zone_by_slba(zns_ns, flash_slba);
-
-    // if(wcidx == -1)
-    // {
-    //     //need flush
-    //     wcidx = 0;
-    //     uint64_t t_used = zns->cache.write_cache[wcidx].used;
-    //     for(i = 0; i < zns->cache.num_wc; i++)
-    //     {
-    //         if(zns->cache.write_cache[i].used == 0)
-    //         {
-    //             t_used = 0;
-    //             wcidx = i; //free wc！
-    //             break;
-    //         }
-    //         if(zns->cache.write_cache[i].used > t_used)
-    //         {
-    //             t_used = zns->cache.write_cache[i].used;
-    //             wcidx = i;
-    //         }
-    //     }
-    //     if (t_used) maxlat = zns_wc_flush(zns, wcidx, USER_IO, req->stime);
-    //     zns->cache.write_cache[wcidx].sblk = zns->active_zone;
-    // }
+    if (!zns->cache.go_flush){
+        return 0;
+    }
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-        // write_log("RAUM flush to lpn 0x%"PRIx64", current lpn: 0x%"PRIx64"\n", flushing_lpn, lpn);
         ppa = get_new_page(zns);
         ppa.g.pl = 0;
         ppa.g.pg = get_blk(zns, &ppa)->page_wp;
@@ -570,16 +529,45 @@ static uint64_t zns_raum_flush(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *re
             struct nand_cmd swr;
             swr.type = USER_IO;
             swr.cmd = NAND_WRITE;
-            swr.stime = req->stime;
+            swr.stime = stime;
             /* get latency statistics */
             sublat = zns_advance_status(zns, &ppa, &swr);
             sublat += SRAM_READ_LATENCY_NS;
             // Assume DRAM latency is hidden by Die latency
             maxlat = (sublat > maxlat) ? sublat : maxlat;
         }
+        /* need to advance the write pointer here */
+        zns_advance_write_pointer(zns);
     }
+    zns->cache.raum_cache_start_lpn = INVALID_LPN;
+    zns->cache.raum_cache_end_lpn = INVALID_LPN;
+    zns->cache.go_flush = false;
 
     return maxlat;
+}
+
+
+static uint64_t zns_raum_flush(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
+{
+    NvmePassthruCmd *pcmd = (NvmePassthruCmd *)&req->cmd; 
+    // NvmeNamespace zns_ns = n->namespaces[0];
+    // NvmeNamespace raum_ns = n->namespaces[1];
+    
+    req->status = NVME_SUCCESS;
+    uint32_t flash_slba_low = le32_to_cpu(pcmd->cdw10);
+    uint32_t flash_slba_high = le32_to_cpu(pcmd->cdw11);
+    uint64_t flash_slba = (uint64_t)flash_slba_high << 32 | flash_slba_low;
+    uint32_t nlb = le32_to_cpu(pcmd->cdw12);
+
+    uint64_t secs_per_pg = LOGICAL_PAGE_SIZE / zns->lbasz;
+    uint64_t start_lpn = flash_slba / secs_per_pg;
+    uint64_t end_lpn = (flash_slba + nlb - 1) / secs_per_pg;
+
+    zns->cache.raum_cache_start_lpn = start_lpn;
+    zns->cache.raum_cache_end_lpn = end_lpn;
+    zns->cache.go_flush = true;
+
+    return SRAM_WRITE_LATENCY_NS;
 }
 
 static uint64_t zns_zone_mgmt_send_with_latency(FemuCtrl *n, struct zns_ssd *zns, NvmeRequest *req)
@@ -657,7 +645,8 @@ static void *ftl_thread(void *arg)
     FemuCtrl *n = (FemuCtrl *)arg;
     struct zns_ssd *zns = n->zns;
     NvmeRequest *req = NULL;
-    uint64_t lat = 0, stime = 0;
+    uint64_t lat = 0;
+    uint64_t stime = 0;
     int rc;
     int i;
     int wcidx = 0;
@@ -665,6 +654,12 @@ static void *ftl_thread(void *arg)
     while (!*(zns->dataplane_started_ptr)) {
         usleep(100000);
     }
+
+    #ifdef FEMU_DEBUG_FTL
+    char str[80];
+    sprintf(str, "/tmp/femu2.log");
+    femu_log_file = fopen(str, "w+");
+    #endif
 
     /* FIXME: not safe, to handle ->to_ftl and ->to_poller gracefully */
     zns->to_ftl = n->to_ftl;
@@ -727,6 +722,7 @@ static void *ftl_thread(void *arg)
             for(wcidx = 0; wcidx < zns->cache.num_wc; wcidx++){
                 stime += zns_wc_flush(zns, wcidx, USER_IO, stime);
             }
+            stime += zns_raum_flush_buffer(n, zns, stime);
 
         }
     }

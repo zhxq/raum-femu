@@ -1048,7 +1048,7 @@ static uint16_t zns_nvme_raum_flush(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd
     status = zns_check_zone_write(n, zns_ns, zone, flash_slba, nlb, append);
     // femu_log("zns_nvme_raum_flush 5\n");
     if (status) {
-        femu_err("Misao check zone write failed with status (%u)\n",status);
+        femu_err("Misao check RAUM write failed with status (%u)\n",status);
         goto err;
     }
 
@@ -1569,6 +1569,9 @@ static void zns_init_params(FemuCtrl *n)
         id_zns->cache.write_cache[i].cap = (id_zns->stripe_unit / LOGICAL_PAGE_SIZE);
         id_zns->cache.write_cache[i].lpns = g_malloc0(sizeof(uint64_t) * id_zns->cache.write_cache[i].cap);
     }
+    id_zns->cache.raum_cache_end_lpn = INVALID_LPN;
+    id_zns->cache.raum_cache_end_lpn = INVALID_LPN;
+    id_zns->cache.go_flush = false;
 
     femu_log("===========================================\n");
     femu_log("|        ZMS HW Configuration()           |\n");      

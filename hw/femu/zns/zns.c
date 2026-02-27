@@ -2,7 +2,7 @@
 
 #define MIN_DISCARD_GRANULARITY     (4 * KiB)
 #define NVME_DEFAULT_ZONE_SIZE      (128 * MiB)
-#define NVME_DEFAULT_MAX_AZ_SIZE    (256 * KiB)
+#define NVME_DEFAULT_MAX_AZ_SIZE    (512 * KiB)
 
 static int zns_init_zone_geometry(NvmeNamespace *ns, Error **errp)
 {

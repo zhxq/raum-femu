@@ -1240,7 +1240,7 @@ typedef struct ZNSCtrlParams {
     uint8_t  zns_num_ch;
     uint8_t  zns_num_lun;
     uint8_t  zns_num_plane;
-    uint8_t  zns_num_blk;
+    uint16_t  zns_num_blk;
     int zns_flash_type;
     uint32_t zns_num_zrwa;
     uint32_t zns_zrwas;

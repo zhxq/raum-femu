@@ -708,7 +708,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("zns_num_ch", FemuCtrl, zns_params.zns_num_ch, 8),
     DEFINE_PROP_UINT8("zns_num_lun", FemuCtrl, zns_params.zns_num_lun, 8),
     DEFINE_PROP_UINT8("zns_num_plane", FemuCtrl, zns_params.zns_num_plane, 1),
-    DEFINE_PROP_UINT8("zns_num_blk", FemuCtrl, zns_params.zns_num_blk, 32),
+    DEFINE_PROP_UINT16("zns_num_blk", FemuCtrl, zns_params.zns_num_blk, 32),
     DEFINE_PROP_INT32("zns_flash_type", FemuCtrl, zns_params.zns_flash_type, QLC),
     DEFINE_PROP_UINT32("zns_num_zrwa", FemuCtrl, zns_params.zns_num_zrwa, 0),
     DEFINE_PROP_UINT32("zns_zrwas", FemuCtrl, zns_params.zns_zrwas, 1048576),

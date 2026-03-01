@@ -31,7 +31,7 @@
  * tlc: one-step program, plat_us = 1e6×PageSize×3÷(ProgramThroughput/# of planes) [ISSCC 2024] A 1Tb Density 3b/Cell 3D-NAND Flash on a 2YY-Tier Technology with a 300MB/s Write Throughput
  * qlc: two-step program, plat_us = 2×1e6×PageSize×4÷(ProgramThroughput/# of planes) [ISSCC 2024] A 280-Layer 1Tb 4b/cell 3D-NAND Flash Memory with a 28.5Gb/mm2 Areal Density and a 3.2GB/s High-Speed IO Rate
  */
-#define SLC_PROGRAM_LATENCY_NS (160000)
+#define SLC_PROGRAM_LATENCY_NS (240000)
 #define TLC_PROGRAM_LATENCY_NS (937500)
 #define QLC_PROGRAM_LATENCY_NS (12196000)
 
